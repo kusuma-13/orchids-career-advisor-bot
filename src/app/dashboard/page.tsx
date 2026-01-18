@@ -85,6 +85,8 @@ export default function DashboardPage() {
   const [jobsLoading, setJobsLoading] = useState(false)
   const [jobQuery, setJobQuery] = useState("")
   const [jobLocation, setJobLocation] = useState("")
+  const [recommendedJobs, setRecommendedJobs] = useState<Job[]>([])
+  const [recommendedJobsLoading, setRecommendedJobsLoading] = useState(false)
   
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState("")
@@ -103,6 +105,13 @@ export default function DashboardPage() {
   const [targetRole, setTargetRole] = useState("")
   
   const [courseFilter, setCourseFilter] = useState("all")
+  const [savedJobs, setSavedJobs] = useState<string[]>([])
+  const [savedCourses, setSavedCourses] = useState<string[]>([])
+  const [savingJob, setSavingJob] = useState<string | null>(null)
+  const [savingCourse, setSavingCourse] = useState<string | null>(null)
+  const [savedJobsList, setSavedJobsList] = useState<any[]>([])
+  const [savedCoursesList, setSavedCoursesList] = useState<any[]>([])
+  const [loadingSaved, setLoadingSaved] = useState(false)
   
   const [profileForm, setProfileForm] = useState({
     full_name: "",
@@ -161,14 +170,28 @@ export default function DashboardPage() {
         .order("created_at", { ascending: true })
         .limit(50)
       
-      if (chatData && chatData.length > 0) {
-        setChatMessages(chatData.map(c => ({ 
-          role: c.role as "user" | "assistant", 
-          content: c.message 
-        })))
-      }
-      
-      setLoading(false)
+if (chatData && chatData.length > 0) {
+          setChatMessages(chatData.map(c => ({ 
+            role: c.role as "user" | "assistant", 
+            content: c.message 
+          })))
+        }
+
+        const savedJobsRes = await fetch("/api/saved-jobs")
+        if (savedJobsRes.ok) {
+          const savedJobsData = await savedJobsRes.json()
+          setSavedJobs(savedJobsData.jobs?.map((j: any) => `${j.job_title}-${j.company}`) || [])
+          setSavedJobsList(savedJobsData.jobs || [])
+        }
+
+        const savedCoursesRes = await fetch("/api/saved-courses")
+        if (savedCoursesRes.ok) {
+          const savedCoursesData = await savedCoursesRes.json()
+          setSavedCourses(savedCoursesData.courses?.map((c: any) => c.course_title) || [])
+          setSavedCoursesList(savedCoursesData.courses || [])
+        }
+        
+        setLoading(false)
     }
     loadUserData()
   }, [router, supabase])
@@ -237,6 +260,26 @@ export default function DashboardPage() {
     setJobsLoading(false)
   }
 
+  const fetchRecommendedJobs = async (role?: string) => {
+    setRecommendedJobsLoading(true)
+    try {
+      const searchQuery = role || profile?.desired_role || "software developer"
+      const searchLocation = profile?.location || ""
+      const res = await fetch(`/api/jobs?query=${encodeURIComponent(searchQuery)}&location=${encodeURIComponent(searchLocation)}`)
+      const data = await res.json()
+      setRecommendedJobs(data.jobs?.slice(0, 6) || [])
+    } catch (error) {
+      console.error("Failed to fetch recommended jobs")
+    }
+    setRecommendedJobsLoading(false)
+  }
+
+  useEffect(() => {
+    if (profile && !loading) {
+      fetchRecommendedJobs()
+    }
+  }, [profile, loading])
+
   const sendChatMessage = async () => {
     if (!chatInput.trim()) return
     const userMessage = chatInput
@@ -265,8 +308,15 @@ export default function DashboardPage() {
     const file = e.target.files?.[0]
     if (!file) return
 
-    if (file.type !== "application/pdf") {
-      toast.error("Please upload a PDF file")
+    const fileExtension = file.name.split('.').pop()?.toLowerCase()
+    const validTypes = [
+      "application/pdf",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ]
+    const isValidExtension = ["pdf", "docx"].includes(fileExtension || "")
+
+    if (!validTypes.includes(file.type) && !isValidExtension) {
+      toast.error("Please upload a PDF or DOCX file")
       return
     }
 
@@ -282,12 +332,13 @@ export default function DashboardPage() {
       const data = await res.json()
       if (data.text) {
         setResumeText(data.text)
-        toast.success("PDF parsed successfully!")
+        setUploadedFileName(file.name)
+        toast.success("Resume uploaded successfully!")
       } else {
-        toast.error(data.error || "Failed to parse PDF")
+        toast.error(data.error || "Failed to parse file")
       }
     } catch (error) {
-      toast.error("Failed to upload and parse PDF")
+      toast.error("Failed to upload and parse file")
     }
     setUploadingPdf(false)
   }
@@ -352,6 +403,94 @@ export default function DashboardPage() {
     ? COURSES 
     : COURSES.filter(c => c.category.toLowerCase() === courseFilter.toLowerCase())
 
+  const saveJob = async (job: Job) => {
+    const jobKey = `${job.title}-${job.company_name}`
+    setSavingJob(jobKey)
+    try {
+      const res = await fetch("/api/saved-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_title: job.title,
+          company: job.company_name,
+          location: job.location,
+          description: job.description,
+          apply_link: job.apply_options?.[0]?.link || "",
+          salary: job.detected_extensions?.salary || ""
+        })
+      })
+      if (res.ok) {
+        setSavedJobs(prev => [...prev, jobKey])
+        const data = await res.json()
+        setSavedJobsList(prev => [data.job, ...prev])
+        toast.success("Job saved successfully!")
+      } else {
+        const data = await res.json()
+        toast.error(data.error || "Failed to save job")
+      }
+    } catch {
+      toast.error("Failed to save job")
+    }
+    setSavingJob(null)
+  }
+
+  const saveCourse = async (course: Course) => {
+    setSavingCourse(course.title)
+    try {
+      const res = await fetch("/api/saved-courses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          course_title: course.title,
+          provider: course.provider,
+          url: course.url,
+          rating: course.rating,
+          duration: course.duration,
+          level: course.level,
+          category: course.category
+        })
+      })
+      if (res.ok) {
+        setSavedCourses(prev => [...prev, course.title])
+        const data = await res.json()
+        setSavedCoursesList(prev => [data.course, ...prev])
+        toast.success("Course saved successfully!")
+      } else {
+        const data = await res.json()
+        toast.error(data.error || "Failed to save course")
+      }
+    } catch {
+      toast.error("Failed to save course")
+    }
+    setSavingCourse(null)
+  }
+
+  const removeSavedJob = async (id: string, jobKey: string) => {
+    try {
+      const res = await fetch(`/api/saved-jobs?id=${id}`, { method: "DELETE" })
+      if (res.ok) {
+        setSavedJobsList(prev => prev.filter(j => j.id !== id))
+        setSavedJobs(prev => prev.filter(k => k !== jobKey))
+        toast.success("Job removed from saved")
+      }
+    } catch {
+      toast.error("Failed to remove job")
+    }
+  }
+
+  const removeSavedCourse = async (id: string, title: string) => {
+    try {
+      const res = await fetch(`/api/saved-courses?id=${id}`, { method: "DELETE" })
+      if (res.ok) {
+        setSavedCoursesList(prev => prev.filter(c => c.id !== id))
+        setSavedCourses(prev => prev.filter(t => t !== title))
+        toast.success("Course removed from saved")
+      }
+    } catch {
+      toast.error("Failed to remove course")
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -360,16 +499,17 @@ export default function DashboardPage() {
     )
   }
 
-  const navItems = [
-    { id: "dashboard", label: "Dashboard", icon: Briefcase },
-    { id: "profile", label: "Edit Profile", icon: Settings },
-    { id: "jobs", label: "Job Search", icon: Search },
-    { id: "career", label: "Career Recommendations", icon: TrendingUp },
-    { id: "skills", label: "Skill Gap Analysis", icon: Target },
-    { id: "courses", label: "Courses", icon: BookOpen },
-    { id: "resume", label: "Resume Analysis", icon: FileText },
-    { id: "chat", label: "Career Chat", icon: MessageSquare },
-  ]
+const navItems = [
+      { id: "dashboard", label: "Dashboard", icon: Briefcase },
+      { id: "profile", label: "Edit Profile", icon: Settings },
+      { id: "jobs", label: "Job Search", icon: Search },
+      { id: "saved", label: "Saved Items", icon: Bookmark },
+      { id: "career", label: "Career Recommendations", icon: TrendingUp },
+      { id: "skills", label: "Skill Gap Analysis", icon: Target },
+      { id: "courses", label: "Courses", icon: BookOpen },
+      { id: "resume", label: "Resume Analysis", icon: FileText },
+      { id: "chat", label: "Career Chat", icon: MessageSquare },
+    ]
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -612,19 +752,30 @@ export default function DashboardPage() {
                             )}
                           </div>
                           <div className="flex flex-col gap-2">
-                            {job.apply_options && job.apply_options.length > 0 && (
-                              <a href={job.apply_options[0].link} target="_blank" rel="noopener noreferrer">
-                                <Button className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
-                                  Apply Now
-                                  <ExternalLink className="w-4 h-4 ml-2" />
-                                </Button>
-                              </a>
-                            )}
-                            <Button variant="outline" className="w-full">
-                              <Bookmark className="w-4 h-4 mr-2" />
-                              Save
-                            </Button>
-                          </div>
+                              {job.apply_options && job.apply_options.length > 0 && (
+                                <a href={job.apply_options[0].link} target="_blank" rel="noopener noreferrer">
+                                  <Button className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+                                    Apply Now
+                                    <ExternalLink className="w-4 h-4 ml-2" />
+                                  </Button>
+                                </a>
+                              )}
+                              <Button 
+                                variant="outline" 
+                                className="w-full"
+                                onClick={() => saveJob(job)}
+                                disabled={savingJob === `${job.title}-${job.company_name}` || savedJobs.includes(`${job.title}-${job.company_name}`)}
+                              >
+                                {savingJob === `${job.title}-${job.company_name}` ? (
+                                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                ) : savedJobs.includes(`${job.title}-${job.company_name}`) ? (
+                                  <CheckCircle className="w-4 h-4 mr-2 text-green-600" />
+                                ) : (
+                                  <Bookmark className="w-4 h-4 mr-2" />
+                                )}
+                                {savedJobs.includes(`${job.title}-${job.company_name}`) ? "Saved" : "Save"}
+                              </Button>
+                            </div>
                         </div>
                       </CardContent>
                     </Card>
@@ -632,19 +783,256 @@ export default function DashboardPage() {
                 </div>
               )}
 
-              {!jobsLoading && jobs.length === 0 && (
-                <Card className="border-0 shadow-sm">
-                  <CardContent className="p-12 text-center">
-                    <Search className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                    <h3 className="text-lg font-medium text-gray-900 mb-2">Start Your Job Search</h3>
-                    <p className="text-gray-500">Enter keywords and location to find matching jobs</p>
-                  </CardContent>
-                </Card>
-              )}
-            </div>
-          )}
+{!jobsLoading && jobs.length === 0 && (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="text-xl font-semibold text-gray-900">Recommended Jobs</h2>
+                        <p className="text-gray-500 text-sm">Based on your profile{profile?.desired_role ? ` as ${profile.desired_role}` : ""}</p>
+                      </div>
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => fetchRecommendedJobs()}
+                        disabled={recommendedJobsLoading}
+                      >
+                        {recommendedJobsLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Refresh"}
+                      </Button>
+                    </div>
+                    
+                    {recommendedJobsLoading ? (
+                      <div className="flex justify-center py-12">
+                        <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+                      </div>
+                    ) : recommendedJobs.length > 0 ? (
+                      <div className="grid gap-4">
+                        {recommendedJobs.map((job, i) => (
+                          <Card key={i} className="border-0 shadow-sm job-card-hover">
+                            <CardContent className="p-6">
+                              <div className="flex flex-col lg:flex-row lg:items-start gap-4">
+                                <div className="flex-shrink-0">
+                                  {job.thumbnail ? (
+                                    <img src={job.thumbnail} alt={job.company_name} className="w-16 h-16 rounded-lg object-contain bg-gray-50" />
+                                  ) : (
+                                    <div className="w-16 h-16 rounded-lg bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
+                                      <Building2 className="w-8 h-8 text-blue-600" />
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <h3 className="text-lg font-semibold text-gray-900">{job.title}</h3>
+                                  <p className="text-blue-600 font-medium">{job.company_name}</p>
+                                  <div className="flex flex-wrap items-center gap-4 mt-2 text-sm text-gray-500">
+                                    <span className="flex items-center gap-1">
+                                      <MapPin className="w-4 h-4" />
+                                      {job.location}
+                                    </span>
+                                    {job.detected_extensions?.posted_at && (
+                                      <span className="flex items-center gap-1">
+                                        <Clock className="w-4 h-4" />
+                                        {job.detected_extensions.posted_at}
+                                      </span>
+                                    )}
+                                    {job.detected_extensions?.schedule_type && (
+                                      <Badge variant="secondary">{job.detected_extensions.schedule_type}</Badge>
+                                    )}
+                                    {job.detected_extensions?.salary && (
+                                      <span className="flex items-center gap-1 text-green-600 font-medium">
+                                        <DollarSign className="w-4 h-4" />
+                                        {job.detected_extensions.salary}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="mt-3 text-gray-600 line-clamp-2">{job.description}</p>
+                                </div>
+                                <div className="flex flex-col gap-2">
+                                  {job.apply_options && job.apply_options.length > 0 && (
+                                    <a href={job.apply_options[0].link} target="_blank" rel="noopener noreferrer">
+                                      <Button className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+                                        Apply Now
+                                        <ExternalLink className="w-4 h-4 ml-2" />
+                                      </Button>
+                                    </a>
+                                  )}
+                                  <Button 
+                                    variant="outline" 
+                                    className="w-full"
+                                    onClick={() => saveJob(job)}
+                                    disabled={savingJob === `${job.title}-${job.company_name}` || savedJobs.includes(`${job.title}-${job.company_name}`)}
+                                  >
+                                    {savingJob === `${job.title}-${job.company_name}` ? (
+                                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    ) : savedJobs.includes(`${job.title}-${job.company_name}`) ? (
+                                      <CheckCircle className="w-4 h-4 mr-2 text-green-600" />
+                                    ) : (
+                                      <Bookmark className="w-4 h-4 mr-2" />
+                                    )}
+                                    {savedJobs.includes(`${job.title}-${job.company_name}`) ? "Saved" : "Save"}
+                                  </Button>
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    ) : (
+                      <Card className="border-0 shadow-sm">
+                        <CardContent className="p-12 text-center">
+                          <Search className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                          <h3 className="text-lg font-medium text-gray-900 mb-2">No Recommended Jobs Found</h3>
+                          <p className="text-gray-500 mb-4">Update your profile with a desired role to get personalized job recommendations</p>
+                          <Button variant="outline" onClick={() => setActiveTab("profile")}>
+                            Update Profile
+                          </Button>
+                        </CardContent>
+                      </Card>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
-          {activeTab === "career" && (
+            {activeTab === "saved" && (
+              <div className="space-y-6 animate-fade-in">
+                <div>
+                  <h1 className="text-2xl font-bold text-gray-900">Saved Items</h1>
+                  <p className="text-gray-600">View your saved jobs and courses</p>
+                </div>
+
+                <Tabs defaultValue="jobs" className="w-full">
+                  <TabsList className="mb-4">
+                    <TabsTrigger value="jobs">Saved Jobs ({savedJobsList.length})</TabsTrigger>
+                    <TabsTrigger value="courses">Saved Courses ({savedCoursesList.length})</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="jobs">
+                    {savedJobsList.length > 0 ? (
+                      <div className="grid gap-4">
+                        {savedJobsList.map((job) => (
+                          <Card key={job.id} className="border-0 shadow-sm">
+                            <CardContent className="p-6">
+                              <div className="flex flex-col lg:flex-row lg:items-start gap-4">
+                                <div className="w-16 h-16 rounded-lg bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center flex-shrink-0">
+                                  <Building2 className="w-8 h-8 text-blue-600" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <h3 className="text-lg font-semibold text-gray-900">{job.job_title}</h3>
+                                  <p className="text-blue-600 font-medium">{job.company}</p>
+                                  <div className="flex flex-wrap items-center gap-4 mt-2 text-sm text-gray-500">
+                                    <span className="flex items-center gap-1">
+                                      <MapPin className="w-4 h-4" />
+                                      {job.location}
+                                    </span>
+                                    {job.salary && (
+                                      <span className="flex items-center gap-1 text-green-600 font-medium">
+                                        <DollarSign className="w-4 h-4" />
+                                        {job.salary}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="mt-3 text-gray-600 line-clamp-2">{job.description}</p>
+                                </div>
+                                <div className="flex flex-col gap-2">
+                                  {job.apply_link && (
+                                    <a href={job.apply_link} target="_blank" rel="noopener noreferrer">
+                                      <Button className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+                                        Apply Now
+                                        <ExternalLink className="w-4 h-4 ml-2" />
+                                      </Button>
+                                    </a>
+                                  )}
+                                  <Button 
+                                    variant="outline" 
+                                    className="w-full text-red-600 hover:text-red-700 hover:bg-red-50"
+                                    onClick={() => removeSavedJob(job.id, `${job.job_title}-${job.company}`)}
+                                  >
+                                    <Trash2 className="w-4 h-4 mr-2" />
+                                    Remove
+                                  </Button>
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    ) : (
+                      <Card className="border-0 shadow-sm">
+                        <CardContent className="p-12 text-center">
+                          <Bookmark className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                          <h3 className="text-lg font-medium text-gray-900 mb-2">No Saved Jobs</h3>
+                          <p className="text-gray-500 mb-4">Save jobs from the Job Search to view them here</p>
+                          <Button onClick={() => setActiveTab("jobs")} variant="outline">
+                            Search Jobs
+                          </Button>
+                        </CardContent>
+                      </Card>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="courses">
+                    {savedCoursesList.length > 0 ? (
+                      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {savedCoursesList.map((course) => (
+                          <Card key={course.id} className="border-0 shadow-sm">
+                            <CardContent className="p-6">
+                              <div className="flex items-start justify-between mb-4">
+                                <Badge variant="secondary">{course.category}</Badge>
+                                <div className="flex items-center gap-1 text-amber-500">
+                                  <Star className="w-4 h-4 fill-current" />
+                                  <span className="text-sm font-medium">{course.rating}</span>
+                                </div>
+                              </div>
+                              <h3 className="font-semibold text-gray-900 mb-2">{course.course_title}</h3>
+                              <div className="space-y-2 text-sm text-gray-500">
+                                <p className="flex items-center gap-2">
+                                  <GraduationCap className="w-4 h-4" />
+                                  {course.provider}
+                                </p>
+                                <p className="flex items-center gap-2">
+                                  <Clock className="w-4 h-4" />
+                                  {course.duration}
+                                </p>
+                                <p className="flex items-center gap-2">
+                                  <Target className="w-4 h-4" />
+                                  {course.level}
+                                </p>
+                              </div>
+                              <a href={course.url} target="_blank" rel="noopener noreferrer">
+                                <Button className="w-full mt-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+                                  View Course
+                                  <ExternalLink className="w-4 h-4 ml-2" />
+                                </Button>
+                              </a>
+                              <Button 
+                                variant="outline"
+                                className="w-full mt-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                                onClick={() => removeSavedCourse(course.id, course.course_title)}
+                              >
+                                <Trash2 className="w-4 h-4 mr-2" />
+                                Remove
+                              </Button>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    ) : (
+                      <Card className="border-0 shadow-sm">
+                        <CardContent className="p-12 text-center">
+                          <BookOpen className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                          <h3 className="text-lg font-medium text-gray-900 mb-2">No Saved Courses</h3>
+                          <p className="text-gray-500 mb-4">Save courses from the Courses section to view them here</p>
+                          <Button onClick={() => setActiveTab("courses")} variant="outline">
+                            Browse Courses
+                          </Button>
+                        </CardContent>
+                      </Card>
+                    )}
+                  </TabsContent>
+                </Tabs>
+              </div>
+            )}
+
+            {activeTab === "career" && (
             <div className="space-y-6 animate-fade-in">
               <div>
                 <h1 className="text-2xl font-bold text-gray-900">Career Recommendations</h1>
@@ -776,11 +1164,26 @@ export default function DashboardPage() {
                         </p>
                       </div>
                       <a href={course.url} target="_blank" rel="noopener noreferrer">
-                        <Button className="w-full mt-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
-                          View Course
-                          <ExternalLink className="w-4 h-4 ml-2" />
+                          <Button className="w-full mt-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+                            View Course
+                            <ExternalLink className="w-4 h-4 ml-2" />
+                          </Button>
+                        </a>
+                        <Button 
+                          variant="outline"
+                          className="w-full mt-2"
+                          onClick={() => saveCourse(course)}
+                          disabled={savingCourse === course.title || savedCourses.includes(course.title)}
+                        >
+                          {savingCourse === course.title ? (
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          ) : savedCourses.includes(course.title) ? (
+                            <CheckCircle className="w-4 h-4 mr-2 text-green-600" />
+                          ) : (
+                            <Bookmark className="w-4 h-4 mr-2" />
+                          )}
+                          {savedCourses.includes(course.title) ? "Saved" : "Save Course"}
                         </Button>
-                      </a>
                     </CardContent>
                   </Card>
                 ))}
